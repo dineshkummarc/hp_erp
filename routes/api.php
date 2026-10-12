@@ -183,6 +183,7 @@ use App\Http\Controllers\Api\Attendance\AttendanceReportApiController;
 use App\Http\Controllers\Api\Attendance\AttendanceDashboardApiController;
 use App\Http\Controllers\Api\Attendance\AttendanceAdminController;
 use App\Http\Controllers\Api\Attendance\DepartmentScheduleController;
+use App\Http\Controllers\Api\Attendance\EmployeeScheduleRequestController;
 use App\Http\Controllers\Api\Attendance\AttendanceRegularisationApiController;
 
 
@@ -660,6 +661,17 @@ Route::get('/competency/employee-profiles/{id}/career-path', [EmployeeCompetency
 /* SLICE 1 item 7 - THE GAP. Read-only, so no profile gate: an employee may read
  * their OWN gap (competencySubject), anyone else needs an elevated role_key. */
 Route::get('/competency/gap', [\App\Http\Controllers\Api\Competency\CompetencyGapController::class, 'show']);
+Route::get('/competency/gap/narrative', [\App\Http\Controllers\Api\Competency\CompetencyGapController::class, 'narrative']);
+
+/* "Which employees best fit this role?" - new feature, elevated-role only (see
+ * RoleFitController::rank() for why: it reads many employees' ratings at once). */
+Route::get('/competency/role-fit', [\App\Http\Controllers\Api\Competency\RoleFitController::class, 'rank']);
+
+/* "Summarize this employee's capability profile" - own profile, or an elevated
+ * role, same gate as /competency/gap (competencySubject). Built on
+ * competency_kasba_rating (the active system), not the legacy skill matrix
+ * EmployeeCompetencyProfileController reads. */
+Route::get('/competency/profile/{id}', [\App\Http\Controllers\Api\Competency\CompetencyProfileController::class, 'show']);
 
 /* SLICE 1 item 3 - what a job role REQUIRES. jobrole_competency_map holds NO
  * text key, which is what makes the rename proof possible. Writes are HR/Admin. */
@@ -793,6 +805,7 @@ Route::put('/competency/development-plans/{id}', [CompetencyDevelopmentPlanContr
 Route::get('/competency/development-plans/{id}/gaps', [CompetencyDevelopmentPlanController::class, 'gaps'])->whereNumber('id');
 Route::get('/competency/development-plans/{id}/history', [CompetencyDevelopmentPlanController::class, 'history'])->whereNumber('id');
 Route::get('/competency/development-plans/{id}/actions', [CompetencyDevelopmentPlanController::class, 'actions'])->whereNumber('id');
+Route::get('/competency/development-plans/{id}/narrative', [CompetencyDevelopmentPlanController::class, 'narrative'])->whereNumber('id');
 Route::post('/competency/development-plans/{id}/actions', [CompetencyDevelopmentPlanController::class, 'storeAction'])->whereNumber('id')->middleware('subject:people_managers');
 Route::put('/competency/development-plans/{id}/actions/{actionId}', [CompetencyDevelopmentPlanController::class, 'updateAction'])->whereNumber('id')->whereNumber('actionId')->middleware('subject:people_managers');
 Route::delete('/competency/development-plans/{id}/actions/{actionId}', [CompetencyDevelopmentPlanController::class, 'destroyAction'])->whereNumber('id')->whereNumber('actionId')->middleware('subject:people_managers');
@@ -1145,6 +1158,36 @@ Route::prefix('attendance')->group(function () {
         Route::post('/admin/schedules/preview', [DepartmentScheduleController::class, 'preview']);
         Route::post('/admin/schedules/apply', [DepartmentScheduleController::class, 'apply']);
     });
+
+    /*
+    | Employee office hours - propose, withdraw, decide. Phase 19.
+    |
+    | NO ROLE GATE ON THE FIRST THREE, ON PURPOSE.
+    |
+    | What makes them safe is not a role - it is that the SUBJECT is always the
+    | caller. `my-office-hours` and `store` take no employee id at all, and
+    | `destroy` is scoped to the caller's own pending row, so an id belonging to
+    | somebody else simply does not match. This is the same shape as `my-hr`,
+    | whose route comment says the same thing, and the My Leave Requests half of
+    | the leave split.
+    |
+    | `index` serves both halves: ?scope=mine is the caller's own and open to
+    | everybody, ?scope=team is the approver queue and the CONTROLLER refuses it
+    | for anybody who may not decide. Gating the route would have forced the
+    | queue onto a separate path, and a component that asks and renders nothing
+    | on 403 is better than one that guesses at a role.
+    |
+    | `decision` is the only thing in this feature that writes tbluser - and
+    | those columns are a payroll input, since PayrollController reads
+    | saturday_in_date to count 2nd-Saturday lateness. It needs BOTH admin/hr
+    | (authority) and approve_leave (scope); see the controller's docblock for
+    | why approve_leave alone is too wide.
+    */
+    Route::get('/my-office-hours', [EmployeeScheduleRequestController::class, 'mine']);
+    Route::get('/office-hours-requests', [EmployeeScheduleRequestController::class, 'index']);
+    Route::post('/office-hours-requests', [EmployeeScheduleRequestController::class, 'store']);
+    Route::delete('/office-hours-requests/{id}', [EmployeeScheduleRequestController::class, 'destroy'])->whereNumber('id');
+    Route::post('/office-hours-requests/{id}/decision', [EmployeeScheduleRequestController::class, 'decision'])->whereNumber('id');
 });
 
 
@@ -1625,6 +1668,18 @@ Route::prefix('employees-management')->middleware('api.token')->group(function (
          * separate route groups to keep it that way is how it comes back.
          */
         Route::get('/pending-access', [EmployeeDirectoryController::class, 'pendingAccess']);
+    });
+
+    /*
+     * Task Calendar: an administrator recolours a DIFFERENT employee's task
+     * cards. Deliberately its own `profile:admin` group, narrower than the
+     * `profile:admin,hr` block above - this was asked for administrators
+     * specifically, and the frontend's own admin check (Task Calendar's
+     * "Added Calendars" sidebar) matches this exactly, so there is no
+     * endpoint here the UI doesn't also offer.
+     */
+    Route::middleware('profile:admin')->group(function () {
+        Route::put('/{id}/task-card-color', [EmployeeDirectoryController::class, 'updateTaskCardColor'])->whereNumber('id');
     });
 
     Route::get('/', [EmployeeDirectoryController::class, 'index']);
@@ -2461,6 +2516,7 @@ Route::get('/performance/reviews/board', [PerformanceReviewController::class, 'b
 Route::post('/performance/reviews/bulk', [PerformanceReviewController::class, 'bulk'])->middleware('profile:admin,hr');
 Route::get('/performance/reviews', [PerformanceReviewController::class, 'index']);
 Route::get('/performance/reviews/{id}', [PerformanceReviewController::class, 'show'])->whereNumber('id');
+Route::get('/performance/reviews/{id}/narrative', [PerformanceReviewController::class, 'narrative'])->whereNumber('id');
 Route::put('/performance/reviews/{id}', [PerformanceReviewController::class, 'update'])->whereNumber('id');
 Route::post('/performance/reviews/{id}/advance', [PerformanceReviewController::class, 'advance'])->whereNumber('id')->middleware('profile:admin,hr,manager');
 // Nudging somebody is a manager act - nobody reminds themselves. Matches the
@@ -3451,6 +3507,12 @@ Route::prefix('signals')->middleware('api.token')->group(function () {
         Route::post('/ingestion/sources/{id}/analyze', [$ing, 'analyze'])->whereNumber('id')->middleware('throttle:10,1');
         Route::delete('/ingestion/sources/{id}', [$ing, 'destroy'])->whereNumber('id');
         Route::patch('/ingestion/findings/{id}/{action}', [$ing, 'actOnFinding'])->whereNumber('id')->whereIn('action', ['review', 'dismiss']);
+
+        // Structured demand-side import (daily scan). Literal paths: no clash with /signals/{id}.
+        $market = \App\Http\Controllers\Api\Signals\MarketImportController::class;
+        Route::post('/market/import', [$market, 'import'])->middleware('throttle:10,1');
+        Route::get('/market/scan-log', [$market, 'scanLog']);
+        Route::get('/market/rejections', [$market, 'rejections']);
     });
 });
 
@@ -3470,6 +3532,10 @@ Route::prefix('portfolio')->middleware('api.token')->group(function () {
     Route::get('/partners/stats', [$part, 'stats']);
     Route::get('/partners', [$part, 'index']);
     Route::get('/partners/{id}', [$part, 'show']);
+
+    // Readiness confirmation: administrators only (not HR), audited, never automatic.
+    Route::middleware('profile:admin')->post('/offers/{id}/readiness', [$port, 'confirmReadiness']);
+    Route::middleware('profile:admin,hr')->get('/offers/{id}/readiness-log', [$port, 'readinessLog']);
 
     Route::middleware('profile:admin,hr')->group(function () use ($port, $part) {
         Route::post('/offers', [$port, 'store']);
@@ -3494,6 +3560,92 @@ Route::prefix('signals')->middleware('api.token')->group(function () {
     Route::get('/ingestion/findings/{id}/opportunity-matches', [$intel, 'matchFinding'])->whereNumber('id');
     Route::get('/opportunity-matches', [$intel, 'listMatches']);
     Route::post('/matches/action', [$intel, 'actOnMatch']);
+});
+
+/*
+ * GTM & Revenue workspace - /api/gtm.
+ *
+ * Reads: administrator + executive. Writes: administrator only. The tenant always comes
+ * from the token (ResolvesApiIdentity); another organisation's record answers 404.
+ * Literal paths are declared before `/{id}` and every `{id}` is whereNumber.
+ */
+// Reply/bounce intake: PUBLIC, authenticated only by an HMAC signature (App\Domain\Gtm\Outreach\InboundSignature).
+Route::post('gtm/inbound', [\App\Http\Controllers\Api\Gtm\InboundController::class, 'webhook'])->middleware('throttle:120,1')->name('gtm.inbound');
+
+Route::get('gtm/unsubscribe/{contact}', \App\Http\Controllers\Api\Gtm\UnsubscribeController::class)->whereNumber('contact')->middleware(['signed', 'throttle:30,1'])->name('gtm.unsubscribe');
+
+Route::prefix('gtm')->middleware('api.token')->group(function () {
+    $acc = \App\Http\Controllers\Api\Gtm\AccountController::class;
+    $con = \App\Http\Controllers\Api\Gtm\ContactController::class;
+    $ovr = \App\Http\Controllers\Api\Gtm\OverviewController::class;
+    $pb = \App\Http\Controllers\Api\Gtm\PlaybookController::class;
+    $ag = \App\Http\Controllers\Api\Gtm\AgentController::class;
+    $dl = \App\Http\Controllers\Api\Gtm\DealController::class;
+    $ou = \App\Http\Controllers\Api\Gtm\OutreachController::class;
+    $ci = \App\Http\Controllers\Api\Gtm\ContactImportController::class;
+    $fc = \App\Http\Controllers\Api\Gtm\ForecastController::class;
+    $dr = \App\Http\Controllers\Api\Gtm\DirectoryController::class;
+
+    Route::middleware('profile:admin,executive')->group(function () use ($acc, $ovr, $pb, $ag, $dl, $ou, $fc, $dr) {
+        Route::get('/directory', [$dr, 'show']);
+        Route::get('/forecast', [$fc, 'show']);
+        Route::get('/forecast/settings', [$fc, 'settings']);
+        Route::get('/outreach', [$ou, 'index']);
+        Route::get('/outreach/readiness', [$ou, 'readiness']);
+        Route::get('/deals', [$dl, 'index']);
+        Route::get('/deals/pipeline', [$dl, 'pipeline']);
+        Route::get('/deals/health', [$dl, 'health']);
+        Route::get('/deals/{id}', [$dl, 'show'])->whereNumber('id');
+        Route::get('/agents', [$ag, 'index']);
+        Route::get('/agents/runs', [$ag, 'runs']);
+        Route::get('/agents/runs/{id}', [$ag, 'runDetail'])->whereNumber('id');
+        Route::get('/playbooks', [$pb, 'index']);
+        Route::get('/playbooks/{id}', [$pb, 'show'])->whereNumber('id');
+        Route::get('/overview', [$ovr, 'show']);
+        Route::get('/accounts', [$acc, 'index']);
+        Route::get('/accounts/candidates', [$acc, 'candidates']);
+        Route::get('/accounts/{id}', [$acc, 'show'])->whereNumber('id');
+    });
+
+    Route::middleware('profile:admin')->group(function () use ($acc, $con, $pb, $ag, $dl, $ou, $ci, $fc) {
+        Route::put('/forecast/settings', [$fc, 'update']);
+        Route::post('/contacts/import/preview', [$ci, 'preview'])->middleware('throttle:30,1');
+        Route::post('/contacts/import', [$ci, 'import'])->middleware('throttle:20,1');
+        Route::post('/outreach', [$ou, 'store']);
+        Route::post('/outreach/from-analysis', [$ou, 'fromAnalysis']);
+        Route::patch('/outreach/{id}', [$ou, 'update'])->whereNumber('id');
+        Route::post('/outreach/{id}/submit', [$ou, 'submit'])->whereNumber('id');
+        Route::post('/outreach/{id}/approve', [$ou, 'approve'])->whereNumber('id');
+        Route::post('/outreach/{id}/reject', [$ou, 'reject'])->whereNumber('id');
+        Route::post('/outreach/{id}/cancel', [$ou, 'cancel'])->whereNumber('id');
+        Route::post('/outreach/{id}/send', [$ou, 'send'])->whereNumber('id')->middleware('throttle:30,1');
+        Route::post('/deals', [$dl, 'store']);
+        Route::patch('/deals/{id}', [$dl, 'update'])->whereNumber('id');
+        Route::post('/deals/{id}/stage', [$dl, 'stage'])->whereNumber('id');
+        Route::delete('/deals/{id}', [$dl, 'destroy'])->whereNumber('id');
+        Route::post('/deals/{id}/activities', [$dl, 'logActivity'])->whereNumber('id');
+        Route::post('/deals/{id}/score', [$dl, 'score'])->whereNumber('id')->middleware('throttle:20,1');
+        Route::post('/deals/{id}/discovery', [$dl, 'discovery'])->whereNumber('id')->middleware('throttle:20,1');
+        Route::post('/agents/{slug}/run', [$ag, 'run'])->where('slug', 'gtm-[a-z-]+')->middleware('throttle:10,1');
+        Route::post('/playbooks', [$pb, 'store']);
+        Route::post('/playbooks/{id}/customise', [$pb, 'customise'])->whereNumber('id');
+        Route::patch('/playbooks/{id}', [$pb, 'update'])->whereNumber('id');
+        Route::post('/playbooks/{id}/versions/{version}/restore', [$pb, 'restore'])->whereNumber('id')->whereNumber('version');
+        Route::delete('/playbooks/{id}', [$pb, 'destroy'])->whereNumber('id');
+        Route::post('/accounts', [$acc, 'store']);
+        Route::post('/accounts/from-company/{companyId}', [$acc, 'fromCompany'])->whereNumber('companyId');
+        Route::patch('/accounts/{id}', [$acc, 'update'])->whereNumber('id');
+        Route::post('/accounts/{id}/score-icp', [$acc, 'scoreIcp'])->whereNumber('id')->middleware('throttle:20,1');
+        Route::delete('/accounts/{id}', [$acc, 'destroy'])->whereNumber('id');
+
+        Route::post('/accounts/{accountId}/contacts', [$con, 'store'])->whereNumber('accountId');
+        Route::post('/accounts/{accountId}/activities', [$con, 'logActivity'])->whereNumber('accountId');
+        Route::patch('/contacts/{id}', [$con, 'update'])->whereNumber('id');
+        Route::delete('/contacts/{id}', [$con, 'destroy'])->whereNumber('id');
+    });
+
+    // Phase 5+ GTM routes (segments, campaigns, customers, workflows, reports, monitoring, inbound ...).
+    require __DIR__.'/gtm.php';
 });
 
 /*
@@ -3527,4 +3679,112 @@ Route::prefix('v1')->middleware(['api.token', 'throttle:120,1'])->group(function
     Route::get('browse/tree', [$idms, 'tree']);
     Route::get('tags', [$idms, 'tags']);
     Route::get('audit', [$idms, 'audit']);
+});
+
+/*
+ * CRM Marketing — Leads, Contacts, Organizations, Campaigns.
+ *
+ * Leads' menu id (201) was reactivated, not newly created
+ * (database/migrations/2026_11_20_085000_*) — confirmed identical on both
+ * the local and live connections, so `menuright:201,...` (id-based) is safe
+ * below. The 3 NEW leaf rows that same migration created (Contacts,
+ * Organizations, Campaigns) got their ids via plain insertGetId() and are
+ * confirmed to differ per host (e.g. Contacts is 451 locally, 435 on live) —
+ * their own routes (Phase 2/3) must use the access-link-resolving
+ * `platformright:<access_link>,<action>` middleware instead of
+ * `menuright:<id>,...`, never a hardcoded id.
+ *
+ * Tenant-scoped by sub_institute_id only (no syear) via ResolvesApiIdentity
+ * inside each controller — token owner's own tenant wins, never the request.
+ */
+Route::prefix('crm')->group(function () {
+    $crmLead = \App\Http\Controllers\Api\Crm\CrmLeadController::class;
+    $crmPicklist = \App\Http\Controllers\Api\Crm\CrmPicklistController::class;
+    $crmOrg = \App\Http\Controllers\Api\Crm\CrmOrganizationController::class;
+    $crmContact = \App\Http\Controllers\Api\Crm\CrmContactController::class;
+
+    Route::get('picklist-values', [$crmPicklist, 'index']);
+    Route::get('picklist-values/admin', [$crmPicklist, 'adminIndex']);
+    Route::post('picklist-values', [$crmPicklist, 'store']);
+    Route::put('picklist-values/{id}', [$crmPicklist, 'update'])->whereNumber('id');
+
+    Route::get('leads', [$crmLead, 'index'])->middleware('menuright:201,view');
+    Route::get('leads/{id}', [$crmLead, 'show'])->whereNumber('id')->middleware('menuright:201,view');
+    Route::post('leads', [$crmLead, 'store'])->middleware('menuright:201,add');
+    Route::put('leads/{id}', [$crmLead, 'update'])->whereNumber('id')->middleware('menuright:201,edit');
+    Route::delete('leads/{id}', [$crmLead, 'destroy'])->whereNumber('id')->middleware('menuright:201,delete');
+    Route::post('leads/{id}/convert', [$crmLead, 'convert'])->whereNumber('id')->middleware('menuright:201,edit');
+    Route::post('leads/bulk/delete', [$crmLead, 'bulkDelete'])->middleware('menuright:201,delete');
+    Route::post('leads/bulk/assign', [$crmLead, 'bulkAssign'])->middleware('menuright:201,edit');
+    Route::get('leads/duplicates', [$crmLead, 'duplicates'])->middleware('menuright:201,view');
+    Route::post('leads/merge', [$crmLead, 'merge'])->middleware('menuright:201,delete');
+    Route::get('leads/export', [$crmLead, 'export'])->middleware('menuright:201,view');
+    Route::post('leads/import', [$crmLead, 'import'])->middleware('menuright:201,add');
+
+    // Organizations + Contacts: their menu ids differ per database (confirmed
+    // above), so every route here uses the access-link-resolving
+    // `platformright:` middleware, never `menuright:<id>`.
+    $orgLink = '/module/crm/marketing/organizations';
+    Route::get('organizations', [$crmOrg, 'index'])->middleware("platformright:{$orgLink},view");
+    Route::get('organizations/{id}', [$crmOrg, 'show'])->whereNumber('id')->middleware("platformright:{$orgLink},view");
+    Route::get('organizations/{id}/hierarchy', [$crmOrg, 'hierarchy'])->whereNumber('id')->middleware("platformright:{$orgLink},view");
+    Route::post('organizations', [$crmOrg, 'store'])->middleware("platformright:{$orgLink},add");
+    Route::put('organizations/{id}', [$crmOrg, 'update'])->whereNumber('id')->middleware("platformright:{$orgLink},edit");
+    Route::delete('organizations/{id}', [$crmOrg, 'destroy'])->whereNumber('id')->middleware("platformright:{$orgLink},delete");
+    Route::post('organizations/{id}/transfer-ownership', [$crmOrg, 'transferOwnership'])->whereNumber('id')->middleware("platformright:{$orgLink},edit");
+    Route::post('organizations/bulk/delete', [$crmOrg, 'bulkDelete'])->middleware("platformright:{$orgLink},delete");
+    Route::post('organizations/bulk/assign', [$crmOrg, 'bulkAssign'])->middleware("platformright:{$orgLink},edit");
+    Route::get('organizations/duplicates', [$crmOrg, 'duplicates'])->middleware("platformright:{$orgLink},view");
+    Route::post('organizations/merge', [$crmOrg, 'merge'])->middleware("platformright:{$orgLink},delete");
+    Route::get('organizations/export', [$crmOrg, 'export'])->middleware("platformright:{$orgLink},view");
+    Route::post('organizations/import', [$crmOrg, 'import'])->middleware("platformright:{$orgLink},add");
+
+    $contactLink = '/module/crm/marketing/contacts';
+    Route::get('contacts', [$crmContact, 'index'])->middleware("platformright:{$contactLink},view");
+    Route::get('contacts/{id}', [$crmContact, 'show'])->whereNumber('id')->middleware("platformright:{$contactLink},view");
+    Route::post('contacts', [$crmContact, 'store'])->middleware("platformright:{$contactLink},add");
+    Route::put('contacts/{id}', [$crmContact, 'update'])->whereNumber('id')->middleware("platformright:{$contactLink},edit");
+    Route::delete('contacts/{id}', [$crmContact, 'destroy'])->whereNumber('id')->middleware("platformright:{$contactLink},delete");
+    Route::post('contacts/{id}/transfer-ownership', [$crmContact, 'transferOwnership'])->whereNumber('id')->middleware("platformright:{$contactLink},edit");
+    Route::post('contacts/bulk/delete', [$crmContact, 'bulkDelete'])->middleware("platformright:{$contactLink},delete");
+    Route::post('contacts/bulk/assign', [$crmContact, 'bulkAssign'])->middleware("platformright:{$contactLink},edit");
+    Route::get('contacts/duplicates', [$crmContact, 'duplicates'])->middleware("platformright:{$contactLink},view");
+    Route::post('contacts/merge', [$crmContact, 'merge'])->middleware("platformright:{$contactLink},delete");
+    Route::get('contacts/export', [$crmContact, 'export'])->middleware("platformright:{$contactLink},view");
+    Route::post('contacts/import', [$crmContact, 'import'])->middleware("platformright:{$contactLink},add");
+
+    $crmCampaign = \App\Http\Controllers\Api\Crm\CrmCampaignController::class;
+    $campaignLink = '/module/crm/marketing/campaigns';
+    Route::get('campaigns', [$crmCampaign, 'index'])->middleware("platformright:{$campaignLink},view");
+    Route::get('campaigns/{id}', [$crmCampaign, 'show'])->whereNumber('id')->middleware("platformright:{$campaignLink},view");
+    Route::post('campaigns', [$crmCampaign, 'store'])->middleware("platformright:{$campaignLink},add");
+    Route::put('campaigns/{id}', [$crmCampaign, 'update'])->whereNumber('id')->middleware("platformright:{$campaignLink},edit");
+    Route::delete('campaigns/{id}', [$crmCampaign, 'destroy'])->whereNumber('id')->middleware("platformright:{$campaignLink},delete");
+    Route::get('campaigns/{id}/targets', [$crmCampaign, 'getTargets'])->whereNumber('id')->middleware("platformright:{$campaignLink},view");
+    Route::post('campaigns/{id}/targets', [$crmCampaign, 'addTarget'])->whereNumber('id')->middleware("platformright:{$campaignLink},edit");
+    Route::post('campaigns/{id}/targets/bulk', [$crmCampaign, 'bulkAddFromSearch'])->whereNumber('id')->middleware("platformright:{$campaignLink},edit");
+    Route::delete('campaigns/{id}/targets/{targetRowId}', [$crmCampaign, 'removeTarget'])->whereNumber(['id', 'targetRowId'])->middleware("platformright:{$campaignLink},edit");
+    Route::put('campaigns/{id}/targets/{targetRowId}', [$crmCampaign, 'updateTargetStatus'])->whereNumber(['id', 'targetRowId'])->middleware("platformright:{$campaignLink},edit");
+    Route::post('campaigns/bulk/delete', [$crmCampaign, 'bulkDelete'])->middleware("platformright:{$campaignLink},delete");
+    Route::post('campaigns/bulk/assign', [$crmCampaign, 'bulkAssign'])->middleware("platformright:{$campaignLink},edit");
+    Route::get('campaigns/export', [$crmCampaign, 'export'])->middleware("platformright:{$campaignLink},view");
+    Route::post('campaigns/import', [$crmCampaign, 'import'])->middleware("platformright:{$campaignLink},add");
+
+    // Recycle Bin: one shared screen across all 4 modules. No single static
+    // middleware here - CrmRecycleBinController checks each row's own type
+    // against that type's existing menu/platform right internally, since no
+    // "list trashed across modules" permission exists (or should exist) as
+    // its own menu row.
+    $crmRecycleBin = \App\Http\Controllers\Api\Crm\CrmRecycleBinController::class;
+    Route::get('recycle-bin', [$crmRecycleBin, 'index']);
+    Route::post('recycle-bin/{type}/{id}/restore', [$crmRecycleBin, 'restore'])->whereNumber('id');
+    Route::delete('recycle-bin/{type}/{id}', [$crmRecycleBin, 'forceDelete'])->whereNumber('id');
+
+    // Saved Views: same "no static middleware, check the right per-request"
+    // shape as the Recycle Bin above - the module name lives in the request
+    // body/query, not the URL, so one dedicated menu permission can't gate it.
+    $crmSavedView = \App\Http\Controllers\Api\Crm\CrmSavedViewController::class;
+    Route::get('saved-views', [$crmSavedView, 'index']);
+    Route::post('saved-views', [$crmSavedView, 'store']);
+    Route::delete('saved-views/{id}', [$crmSavedView, 'destroy'])->whereNumber('id');
 });

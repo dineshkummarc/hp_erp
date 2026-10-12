@@ -8,9 +8,21 @@ use Illuminate\Support\Facades\Schema;
 return new class extends Migration
 {
     // Schema::hasColumn() selects information_schema.columns.generation_expression,
-    // which MariaDB 10.1 (the hp_erp server) does not have. SHOW COLUMNS works everywhere.
+    // which MariaDB 10.1 (the hp_erp server) does not have, so MySQL/MariaDB keep using
+    // SHOW COLUMNS. SHOW COLUMNS is MySQL-only SQL, though: on any other driver (the sqlite
+    // test database) the portable Schema::hasColumn() is used instead.
     private function hasColumn(string $table, string $column): bool
     {
+        if (! in_array(DB::connection()->getDriverName(), ['mysql', 'mariadb'], true)) {
+    // which MariaDB 10.1 (the hp_erp server) does not have. SHOW COLUMNS works everywhere.
+    // sqlite (the PHPUnit database) has no SHOW COLUMNS and no such information_schema problem, so
+    // it asks Schema directly. MySQL/MariaDB keep the exact statement they have always run.
+    private function hasColumn(string $table, string $column): bool
+    {
+        if (DB::getDriverName() === 'sqlite') {
+            return Schema::hasColumn($table, $column);
+        }
+
         return ! empty(DB::select("SHOW COLUMNS FROM `{$table}` LIKE ?", [$column]));
     }
 
